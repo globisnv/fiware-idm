@@ -188,6 +188,7 @@ exports.validate_participant_from_jwt = async function validate_participant_from
   const parties_params = new URLSearchParams();
   const subject = client_certificate.subject.attributes.map(serialize_attributes).join(', ');
   parties_params.append('eori', client_payload.iss);
+  parties_params.append('certificate_subject_name', subject);
   parties_params.append('active_only', 'true');
 
   debug('url: ' + config.pr.parties_endpoint + '?' + parties_params);
