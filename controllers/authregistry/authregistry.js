@@ -50,6 +50,84 @@ const get_delegation_evidence = async function get_delegation_evidence(subject) 
   return evidence == null ? null : evidence.policy;
 };
 
+const arrays_are_equal = function arrays_are_equal(a, b) {
+  if (a === b) return true;
+  if (a == null || b == null) return false;
+  if (a.length !== b.length) return false;
+
+  a.sort();
+  b.sort();
+
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+
+  return true;
+}
+
+const _retrieve_policy = async function _retrieve_policy(req, res) {
+    const token_info = await authenticate_bearer(req);
+
+    const authorized_email = `${config.pr.client_id}@${config.pr.url}`;
+    if (!token_info.user.admin && token_info.user.email !== authorized_email) {
+      res.status(403).json({
+        error: "You are not authorized to retrieve policies",
+        details: validate_delegation_evicence.errors
+      });
+      return true;
+    }
+
+    if (req.query.accessSubject == null) {
+        res.status(400).json({
+          error: "Missing 'accessSubject' query parameter"
+        });
+        return true;
+    }
+
+    debug('Requesting available delegation evidences');
+
+    const evidence = await get_delegation_evidence(req.query.accessSubject);
+    if (evidence == null) {
+      res.status(404).json({
+        error: "Didn't find any policy with access subject equal to " + req.query.accessSubject
+      });
+      return true;
+    }
+
+    return res.status(200).json({evidence});
+}
+
+const _delete_policy = async function _delete_policy(req, res) {
+  const token_info = await authenticate_bearer(req);
+
+  const authorized_email = `${config.pr.client_id}@${config.pr.url}`;
+  if (!token_info.user.admin && token_info.user.email !== authorized_email) {
+    res.status(403).json({
+      error: "You are not authorized to delete policies",
+      details: validate_delegation_evicence.errors
+    });
+    return true;
+  }
+
+  if (req.query.accessSubject == null) {
+      res.status(400).json({
+        error: "Missing 'accessSubject' query parameter"
+      });
+      return true;
+  }
+
+  debug('Deleting available delegation evidences');
+
+  await models.delegation_evidence.destroy({
+    where: {
+      policy_issuer: config.pr.client_id,
+      access_subject: req.query.accessSubject
+    }
+  });
+
+  return res.status(200).json({});
+}
+
 const _upsert_policy = async function _upsert_policy(req, res) {
   const token_info = await authenticate_bearer(req);
 
@@ -82,11 +160,149 @@ const _upsert_policy = async function _upsert_policy(req, res) {
     return true;
   }
 
-  // Create/update sent policy
   models.delegation_evidence.upsert({
     policy_issuer: evidence.policyIssuer,
     access_subject: evidence.target.accessSubject,
     policy: evidence
+  });
+
+  return res.status(200).json({});
+};
+
+const _upsert_merge_policy = async function _upsert_merge_policy(req, res) {
+  const token_info = await authenticate_bearer(req);
+
+  const authorized_email = `${config.pr.client_id}@${config.pr.url}`;
+  if (!token_info.user.admin && token_info.user.email !== authorized_email) {
+    res.status(403).json({
+      error: "You are not authorized to update policies",
+      details: validate_delegation_evicence.errors
+    });
+    return true;
+  }
+
+  debug(`User ${token_info.user.username}`);
+  if (!validate_delegation_evicence(req.body)) {
+    debug(validate_delegation_evicence.errors);
+    res.status(400).json({
+      error: "Invalid policy document",
+      details: validate_delegation_evicence.errors
+    });
+    return true;
+  }
+
+  const evidence = req.body.delegationEvidence;
+
+  // Check policyIssuer
+  if (evidence.policyIssuer !== config.pr.client_id) {
+    res.status(422).json({
+      error: `Invalid value for policyIssuer: ${evidence.policyIssuer}`
+    });
+    return true;
+  }
+
+  let evidence_current = await get_delegation_evidence(evidence.target.accessSubject);
+  if (evidence_current != null)
+  {
+    // TODO multiple policy sets
+    // TODO rule exceptions
+
+    // Make a list containing all new types (type + id combination)
+    let p_types = [];
+    for (let p_idx = 0; p_idx < evidence.policySets[0].policies.length; p_idx++) {
+      const p_resource = evidence.policySets[0].policies[p_idx].target.resource;
+      const p_actions = evidence.policySets[0].policies[p_idx].target.actions;
+
+      if (!p_types.hasOwnProperty(p_resource.type)) {
+        p_types[p_resource.type] = [];
+      }
+
+      // Collect type + id combo's per actions and attributes
+      const p_obj_prev_idx = p_types[p_resource.type].findIndex(obj => arrays_are_equal(obj.actions, p_actions) && arrays_are_equal(obj.attrs, p_resource.attributes));
+      if (p_obj_prev_idx != -1) {
+        p_types[p_resource.type][p_obj_prev_idx].idx.push(p_idx);
+        p_types[p_resource.type][p_obj_prev_idx].ids.push(...p_resource.identifiers);
+      } else {
+        let p_obj = {idx: [p_idx], ids: p_resource.identifiers, selected: new Array(p_resource.identifiers.length).fill(false), actions: p_actions, attrs: p_resource.attributes};
+        p_types[p_resource.type].push(p_obj);
+      }
+    }
+
+    // Remove these types from the currently stored policy definition
+    for (let p_current_idx = 0; p_current_idx < evidence_current.policySets[0].policies.length; p_current_idx++) {
+      const p_current_rules = evidence_current.policySets[0].policies[p_current_idx].rules;
+      const p_current_resource = evidence_current.policySets[0].policies[p_current_idx].target.resource;
+      const p_current_actions = evidence_current.policySets[0].policies[p_current_idx].target.actions;
+      
+      // Policy has the same type as one of the new policies
+      if (p_types.hasOwnProperty(p_current_resource.type)) {
+        for (let type_idx = 0; type_idx < p_types[p_current_resource.type].length; type_idx++) {
+          const p_obj = p_types[p_current_resource.type][type_idx];
+          if (arrays_are_equal(p_obj.actions, p_current_actions) && arrays_are_equal(p_obj.attrs, p_current_resource.attributes) && p_current_rules.length == 1) {
+            for (let p_ids_idx = 0; p_ids_idx < p_obj.ids.length; p_ids_idx++) {
+              const p_id = p_obj.ids[p_ids_idx];
+              p_obj.selected[p_ids_idx] = true;
+              if (!p_current_resource.identifiers.includes(p_id)) {
+                p_current_resource.identifiers.push(p_id);
+              }
+            }
+  
+            // Remove new policy combination if empty
+            if (p_obj.ids.length == 0) {
+              p_types[p_current_resource.type].splice(p_same_actions_idx, 1);
+            }
+          } else {
+            for (let p_current_ids_idx = 0; p_current_ids_idx < p_current_resource.identifiers.length; p_current_ids_idx++) {
+              if (p_types[p_current_resource.type].some(obj => obj.ids.includes(p_current_resource.identifiers[p_current_ids_idx]))) {
+                p_current_resource.identifiers.splice(p_current_ids_idx, 1);
+                p_current_ids_idx--;
+              }
+            }
+          }
+
+          // Remove policy if empty
+          if (p_current_resource.identifiers.length == 0) {
+            evidence_current.policySets[0].policies.splice(p_current_idx, 1);
+            p_current_idx--;
+            break;
+          }
+        }
+      }
+    }
+
+    // Add the new policies to the policy definition
+    // TODO exceptions to the rule
+    for (let type in p_types) {
+      if (p_types.hasOwnProperty(type)) {
+        for (let t_idx = 0; t_idx < p_types[type].length; t_idx++) {
+          let p = null;
+          for (let p_id_idx = 0; p_id_idx < p_types[type][t_idx].ids.length; p_id_idx++) {
+            if (!p_types[type][t_idx].selected[p_id_idx]) {
+              if (!p) {
+                p = evidence.policySets[0].policies[p_id_idx];
+              } else {
+                const p_id = p_types[type][t_idx].ids[p_id_idx];
+                if (!p.target.resource.identifiers.includes(p_id)) {
+                  p.target.resource.identifiers.push(p_id);
+                }
+              }
+            }
+          }
+
+          if (p) {
+            evidence_current.policySets[0].policies.push(p);
+          }
+        }
+      }
+   }
+  } else {
+    evidence_current = evidence;
+  }
+
+  models.delegation_evidence.upsert({
+    policy_issuer: evidence_current.policyIssuer,
+    access_subject: evidence_current.target.accessSubject,
+    policy: evidence_current
   });
 
   return res.status(200).json({});
@@ -223,9 +439,106 @@ const _query_evidences = async function _query_evidences(req, res) {
 
 exports.oauth2 = oauth2;
 exports.get_delegation_evidence = get_delegation_evidence;
+exports.arrays_are_equal = arrays_are_equal;
 exports.upsert_policy = function upsert_policy(req, res, next) {
-  debug(' --> policy');
+  debug(' --> upsert policy');
   _upsert_policy(req, res).then(
+    (skip) => {
+      if (!skip) {
+        next();
+      }
+    },
+    (err) => {
+      if (err instanceof oauth2_server.OAuthError) {
+        debug('Error ', err.message);
+        if (err.details) {
+          debug('Due: ', err.details);
+        }
+        res.status(err.status = err.code);
+
+        res.locals.error = err;
+        res.render('errors/oauth', {
+          query: {},
+          application: req.application
+        });
+      } else {
+        res.status(500).json({
+          message: err,
+          code: 500,
+          title: 'Internal Server Error'
+        });
+      }
+    }
+  );
+};
+
+exports.upsert_merge_policy = function upsert_merge_policy(req, res, next) {
+  debug(' --> upsert merge policy');
+  _upsert_merge_policy(req, res).then(
+    (skip) => {
+      if (!skip) {
+        next();
+      }
+    },
+    (err) => {
+      if (err instanceof oauth2_server.OAuthError) {
+        debug('Error ', err.message);
+        if (err.details) {
+          debug('Due: ', err.details);
+        }
+        res.status(err.status = err.code);
+
+        res.locals.error = err;
+        res.render('errors/oauth', {
+          query: {},
+          application: req.application
+        });
+      } else {
+        res.status(500).json({
+          message: err,
+          code: 500,
+          title: 'Internal Server Error'
+        });
+      }
+    }
+  );
+};
+
+exports.delete_policy = function delete_policy(req, res, next) {
+  debug(' --> delete policy');
+  _delete_policy(req, res).then(
+    (skip) => {
+      if (!skip) {
+        next();
+      }
+    },
+    (err) => {
+      if (err instanceof oauth2_server.OAuthError) {
+        debug('Error ', err.message);
+        if (err.details) {
+          debug('Due: ', err.details);
+        }
+        res.status(err.status = err.code);
+
+        res.locals.error = err;
+        res.render('errors/oauth', {
+          query: {},
+          application: req.application
+        });
+      } else {
+        res.status(500).json({
+          message: err,
+          code: 500,
+          title: 'Internal Server Error'
+        });
+      }
+    }
+  );
+};
+
+exports.retrieve_policy = function retrieve_policy(req, res, next) {
+  debug(' --> retrieve policy');
+  _retrieve_policy(req, res).then(
     (skip) => {
       if (!skip) {
         next();

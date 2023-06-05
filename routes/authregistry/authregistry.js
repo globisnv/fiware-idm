@@ -5,10 +5,22 @@ const debug = require('debug')('idm:authregistry_model');
 const authregistry_controller = require('../../controllers/authregistry/authregistry');
 
 // Routes for the Authorization Registry module
+router.get(
+  '/policy',
+  authregistry_controller.retrieve_policy
+);
 router.post(
   '/policy',
   authregistry_controller.upsert_policy
-)
+);
+router.patch(
+  '/policy',
+  authregistry_controller.upsert_merge_policy
+);
+router.delete(
+  '/policy',
+  authregistry_controller.delete_policy
+);
 router.post(
   '/delegation',
   authregistry_controller.query_evidences
