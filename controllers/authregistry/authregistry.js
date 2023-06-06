@@ -246,14 +246,9 @@ const _upsert_merge_policy = async function _upsert_merge_policy(req, res) {
                 p_current_resource.identifiers.push(p_id);
               }
             }
-  
-            // Remove new policy combination if empty
-            if (p_obj.ids.length == 0) {
-              p_types[p_current_resource.type].splice(p_same_actions_idx, 1);
-            }
           } else {
             for (let p_current_ids_idx = 0; p_current_ids_idx < p_current_resource.identifiers.length; p_current_ids_idx++) {
-              if (p_types[p_current_resource.type].some(obj => obj.ids.includes(p_current_resource.identifiers[p_current_ids_idx]))) {
+              if (p_obj.ids.includes(p_current_resource.identifiers[p_current_ids_idx])) {
                 p_current_resource.identifiers.splice(p_current_ids_idx, 1);
                 p_current_ids_idx--;
               }
@@ -279,7 +274,7 @@ const _upsert_merge_policy = async function _upsert_merge_policy(req, res) {
           for (let p_id_idx = 0; p_id_idx < p_types[type][t_idx].ids.length; p_id_idx++) {
             if (!p_types[type][t_idx].selected[p_id_idx]) {
               if (!p) {
-                p = evidence.policySets[0].policies[p_id_idx];
+                p = evidence.policySets[0].policies[p_types[type][t_idx].idx[p_id_idx]];
               } else {
                 const p_id = p_types[type][t_idx].ids[p_id_idx];
                 if (!p.target.resource.identifiers.includes(p_id)) {
