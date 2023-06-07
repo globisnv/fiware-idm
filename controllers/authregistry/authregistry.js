@@ -217,7 +217,7 @@ const _upsert_merge_policy = async function _upsert_merge_policy(req, res) {
         p_types[p_resource.type] = [];
       }
 
-      // Collect type + id combo's per actions and attributes
+      // Collect type + id combo's per actions and attributes, to be used later
       const p_obj_prev_idx = p_types[p_resource.type].findIndex(obj => arrays_are_equal(obj.actions, p_actions) && arrays_are_equal(obj.attrs, p_resource.attributes));
       if (p_obj_prev_idx != -1) {
         p_types[p_resource.type][p_obj_prev_idx].idx.push(p_idx);
@@ -230,15 +230,21 @@ const _upsert_merge_policy = async function _upsert_merge_policy(req, res) {
 
     // Remove these types from the currently stored policy definition
     for (let p_current_idx = 0; p_current_idx < evidence_current.policySets[0].policies.length; p_current_idx++) {
-      const p_current_rules = evidence_current.policySets[0].policies[p_current_idx].rules;
-      const p_current_resource = evidence_current.policySets[0].policies[p_current_idx].target.resource;
-      const p_current_actions = evidence_current.policySets[0].policies[p_current_idx].target.actions;
+      const p_current_policy = evidence_current.policySets[0].policies[p_current_idx];
+      const p_current_resource = p_current_policy.target.resource;
+      const p_current_actions = p_current_policy.target.actions;
       
       // Policy has the same type as one of the new policies
       if (p_types.hasOwnProperty(p_current_resource.type)) {
         for (let type_idx = 0; type_idx < p_types[p_current_resource.type].length; type_idx++) {
+
+          // Get currently looped new policy object
           const p_obj = p_types[p_current_resource.type][type_idx];
-          if (arrays_are_equal(p_obj.actions, p_current_actions) && arrays_are_equal(p_obj.attrs, p_current_resource.attributes) && p_current_rules.length == 1) {
+
+          // Check whether the currently looped new policy object has the same actions as the currently looped stored policy object.
+          // If this is the case, it means that the new identifiers in the policy object can be safely added to the identifiers linked to the stored policy object.
+          // If this is not the case, it means that new identifiers must not be present in the identifiers linked to the stored policy object.
+          if (arrays_are_equal(p_obj.actions, p_current_actions) && arrays_are_equal(p_obj.attrs, p_current_resource.attributes) && p_current_policy.rules.length == 1) {
             for (let p_ids_idx = 0; p_ids_idx < p_obj.ids.length; p_ids_idx++) {
               const p_id = p_obj.ids[p_ids_idx];
               p_obj.selected[p_ids_idx] = true;
@@ -274,7 +280,8 @@ const _upsert_merge_policy = async function _upsert_merge_policy(req, res) {
           for (let p_id_idx = 0; p_id_idx < p_types[type][t_idx].ids.length; p_id_idx++) {
             if (!p_types[type][t_idx].selected[p_id_idx]) {
               if (!p) {
-                p = evidence.policySets[0].policies[p_types[type][t_idx].idx[p_id_idx]];
+                const policy_idx = p_types[type][t_idx].idx[p_id_idx];
+                p = evidence.policySets[0].policies[policy_idx];
               } else {
                 const p_id = p_types[type][t_idx].ids[p_id_idx];
                 if (!p.target.resource.identifiers.includes(p_id)) {
