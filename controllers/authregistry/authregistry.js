@@ -109,21 +109,103 @@ const _delete_policy = async function _delete_policy(req, res) {
     return true;
   }
 
-  if (req.query.accessSubject == null) {
+  if (!req.query.accessSubject || req.query.accessSubject === "") {
       res.status(400).json({
         error: "Missing 'accessSubject' query parameter"
       });
       return true;
   }
 
-  debug('Deleting available delegation evidences');
-
-  await models.delegation_evidence.destroy({
-    where: {
-      policy_issuer: config.pr.client_id,
-      access_subject: req.query.accessSubject
+  // Check whether one or more 'identifier' query parameters are given
+  // If not present, delete the full access policy
+  // If present, only delete the parts of the access policy that contain the given identifiers
+  if (!req.query.identifier || req.query.identifier === "") {
+    debug(`Deleting full access policy for ${req.query.accessSubject}`);
+    await models.delegation_evidence.destroy({
+      where: {
+        policy_issuer: config.pr.client_id,
+        access_subject: req.query.accessSubject
+      }
+    });
+  } else {
+    debug(`Retrieving existing access policy information for ${req.query.accessSubject}`);
+    let evidence_current = await get_delegation_evidence(req.query.accessSubject);
+    let ids_to_delete = req.query.identifier;
+    if (!Array.isArray(ids_to_delete)) {
+      ids_to_delete = [ids_to_delete];
     }
-  });
+
+    // Loop over all policy sets
+    debug(`Deleting access policy information for ${req.query.accessSubject} on identifiers ${ids_to_delete}`);
+    for (let set_idx = 0; set_idx < evidence_current.policySets.length; set_idx++) {
+      debug(`Processing policy set ${set_idx}`);
+
+      // Loop over all policies in the current policy set
+      for (let policy_idx = 0; policy_idx < evidence_current.policySets[set_idx].policies.length; policy_idx++) {
+        debug(`  Processing policy ${policy_idx} from the current policy set`);
+
+        // Remove to be deleted identifiers from the policy target resource
+        debug(`  Filtering resource identifiers within the current policy`);
+        const policy = evidence_current.policySets[set_idx].policies[policy_idx];
+        policy.target.resource.identifiers = policy.target.resource.identifiers.filter(id => !ids_to_delete.includes(id));
+
+        // Loop over all rules in the current policy 
+        for (let rule_idx = 0; rule_idx < policy.rules.length; rule_idx++) {
+          debug(`    Processing rule ${rule_idx} from the current policy`);
+          const rule = policy.rules[rule_idx];
+
+          // Skip base rule that only has the 'effect' attribute
+          if (rule.target != null) {
+
+            // Remove to be deleted identifiers from the rule target resource
+            debug(`    Filtering resource identifiers within the current rule`);
+            rule.target.resource.identifiers = rule.target.resource.identifiers.filter(id => !ids_to_delete.includes(id));
+
+            // Remove rule if it has no identifiers left
+            if (rule.target.resource.identifiers.length == 0) {
+              debug(`    Deleting current rule because it is empty`);
+              policy.rules.splice(rule_idx, 1);
+              rule_idx--;
+            }
+          }
+        }
+
+        // Remove policy if it has no identifiers and rules left
+        if (policy.target.resource.identifiers.length == 0 && policy.rules.length == 1) {
+          debug(`  Deleting current policy because it is empty`);
+          evidence_current.policySets[set_idx].policies.splice(policy_idx, 1);
+          policy_idx--;
+        }
+      }
+
+      // Remove policy set if it has no policies left
+      if (evidence_current.policySets[set_idx].policies.length == 0) {
+        debug(`Deleting current policy set because it is empty`);
+        evidence_current.policySets.splice(set_idx, 1);
+        set_idx--;
+      }
+    }
+
+    // If there are no policy sets left, delete the whole policy
+    // If there are, replace the existing access policy 
+    if (evidence_current.policySets.length == 0) {
+      debug(`Deleting full access policy for ${req.query.accessSubject}`);
+      await models.delegation_evidence.destroy({
+        where: {
+          policy_issuer: config.pr.client_id,
+          access_subject: req.query.accessSubject
+        }
+      });
+    }
+    else {
+      debug(`Replacing access policy for ${req.query.accessSubject}`);
+      models.delegation_evidence.upsert({
+        policy_issuer: evidence_current.policyIssuer,
+        access_subject: evidence_current.target.accessSubject,
+        policy: evidence_current
+      });
+    }
+  }
 
   return res.status(200).json({});
 }
