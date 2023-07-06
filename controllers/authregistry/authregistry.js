@@ -77,7 +77,7 @@ const _retrieve_policy = async function _retrieve_policy(req, res) {
       return true;
     }
 
-    if (req.query.accessSubject == null) {
+    if (!req.query.accessSubject) {
         res.status(400).json({
           error: "Missing 'accessSubject' query parameter"
         });
@@ -109,7 +109,7 @@ const _delete_policy = async function _delete_policy(req, res) {
     return true;
   }
 
-  if (!req.query.accessSubject || req.query.accessSubject === "") {
+  if (!req.query.accessSubject) {
       res.status(400).json({
         error: "Missing 'accessSubject' query parameter"
       });
@@ -119,7 +119,7 @@ const _delete_policy = async function _delete_policy(req, res) {
   // Check whether one or more 'identifier' query parameters are given
   // If not present, delete the full access policy
   // If present, only delete the parts of the access policy that contain the given identifiers
-  if (!req.query.identifier || req.query.identifier === "") {
+  if (!req.query.identifier) {
     debug(`Deleting full access policy for ${req.query.accessSubject}`);
     await models.delegation_evidence.destroy({
       where: {
@@ -130,6 +130,13 @@ const _delete_policy = async function _delete_policy(req, res) {
   } else {
     debug(`Retrieving existing access policy information for ${req.query.accessSubject}`);
     let evidence_current = await get_delegation_evidence(req.query.accessSubject);
+
+    // Skip delete if no access policy is stored for the given subject
+    if (evidence_current == null) {
+      debug(`No access policy found with given subject, skipping delete`);
+      return res.status(200).json({});
+    }
+
     let ids_to_delete = req.query.identifier;
     if (!Array.isArray(ids_to_delete)) {
       ids_to_delete = [ids_to_delete];
