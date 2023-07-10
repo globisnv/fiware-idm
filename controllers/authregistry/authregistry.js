@@ -68,6 +68,7 @@ const arrays_are_equal = function arrays_are_equal(a, b) {
 const _retrieve_policy = async function _retrieve_policy(req, res) {
     const token_info = await authenticate_bearer(req);
 
+    debug(`Checking whether user is an admin`);
     const authorized_email = `${config.pr.client_id}@${config.pr.url}`;
     if (!token_info.user.admin && token_info.user.email !== authorized_email) {
       res.status(403).json({
@@ -97,9 +98,92 @@ const _retrieve_policy = async function _retrieve_policy(req, res) {
     return res.status(200).json({evidence});
 }
 
+const _simplify_policy = async function _simplify_policy(req, res) {
+  const token_info = await authenticate_bearer(req);
+
+  debug(`Validating delegation evidence structure`);
+  if (!validate_delegation_evicence(req.body)) {
+    debug(validate_delegation_evicence.errors);
+    res.status(400).json({
+      error: "Invalid policy document",
+      details: validate_delegation_evicence.errors
+    });
+    return true;
+  }
+
+  const evidence = req.body.delegationEvidence;
+
+  // Merge molicy sets
+  evidence.policySets = evidence.policySets.reduce((acc, curr) => {
+    const matching_set_idx = acc.findIndex(set => set.maxDelegationDepth == curr.maxDelegationDepth 
+      && arrays_are_equal(set.target.environment.licenses, curr.target.environment.licenses))
+      
+    if (matching_set_idx != -1) {
+      acc[matching_set_idx].policies.push(...curr.policies);
+    }
+    else {
+      acc.push(curr);
+    }
+
+    return acc;
+  }, []);
+
+  // Merge policies inside policy set
+  evidence.policySets.every(set => {
+    set.policies = set.policies.reduce((acc, curr) => {
+      const curr_resource = curr.target.resource;
+      const matching_policy_idx = acc.findIndex(pol => {
+        const pol_resource = pol.target.resource;
+        return pol_resource.type == curr_resource.type
+          && arrays_are_equal(pol_resource.attributes, curr_resource.attributes)
+          && arrays_are_equal(pol.target.actions, curr.target.actions);
+      });
+
+      if (matching_policy_idx) {
+        acc[matching_policy_idx].target.resource.identifiers.push(...curr.target.resource.identifiers);
+        acc[matching_policy_idx].rules.push(...curr.rules.filter(r => r.effect != "Permit")); // Following official iSHARE spec that notes that only the first rule can be a permit
+      }
+      else {
+        acc.push(curr);
+      }
+
+      return acc;
+    });
+  });
+
+  // merge rules inside policy
+  evidence.policySets.every(set => {
+    set.policies.every(pol => {
+      pol.rules.reduce((acc, curr) => {
+        if (curr.target) {
+          const curr_resource = curr.target.resource;
+          const matching_rule_idx = acc.findIndex(rule => {
+            const rule_resource = rule.target.resource;
+            return rule_resource.type == curr_resource.type
+              && arrays_are_equal(rule_resource.attributes, curr_resource.attributes)
+              && arrays_are_equal(rule.target.actions, curr.target.actions);
+          });
+    
+          if (matching_rule_idx) {
+            acc[matching_rule_idx].target.resource.identifiers.push(...curr.target.resource.identifiers);
+          }
+          else {
+            acc.push(curr);
+          }
+        }
+
+        return acc;
+      });
+    })
+  })
+
+  return res.status(200).json({evidence});
+};
+
 const _delete_policy = async function _delete_policy(req, res) {
   const token_info = await authenticate_bearer(req);
 
+  debug(`Checking whether user is an admin`);
   const authorized_email = `${config.pr.client_id}@${config.pr.url}`;
   if (!token_info.user.admin && token_info.user.email !== authorized_email) {
     res.status(403).json({
@@ -151,6 +235,7 @@ const _delete_policy = async function _delete_policy(req, res) {
       for (let policy_idx = 0; policy_idx < evidence_current.policySets[set_idx].policies.length; policy_idx++) {
         debug(`  Processing policy ${policy_idx} from the current policy set`);
 
+        if ()
         // Remove to be deleted identifiers from the policy target resource
         debug(`  Filtering resource identifiers within the current policy`);
         const policy = evidence_current.policySets[set_idx].policies[policy_idx];
@@ -220,6 +305,7 @@ const _delete_policy = async function _delete_policy(req, res) {
 const _upsert_policy = async function _upsert_policy(req, res) {
   const token_info = await authenticate_bearer(req);
 
+  debug(`Checking whether user is an admin`);
   const authorized_email = `${config.pr.client_id}@${config.pr.url}`;
   if (!token_info.user.admin && token_info.user.email !== authorized_email) {
     res.status(403).json({
@@ -229,7 +315,7 @@ const _upsert_policy = async function _upsert_policy(req, res) {
     return true;
   }
 
-  debug(`User ${token_info.user.username}`);
+  debug(`Validating delegation evidence structure`);
   if (!validate_delegation_evicence(req.body)) {
     debug(validate_delegation_evicence.errors);
     res.status(400).json({
@@ -261,6 +347,7 @@ const _upsert_policy = async function _upsert_policy(req, res) {
 const _upsert_merge_policy = async function _upsert_merge_policy(req, res) {
   const token_info = await authenticate_bearer(req);
 
+  debug(`Checking whether user is an admin`);
   const authorized_email = `${config.pr.client_id}@${config.pr.url}`;
   if (!token_info.user.admin && token_info.user.email !== authorized_email) {
     res.status(403).json({
@@ -270,7 +357,7 @@ const _upsert_merge_policy = async function _upsert_merge_policy(req, res) {
     return true;
   }
 
-  debug(`User ${token_info.user.username}`);
+  debug(`Validating delegation evidence structure`);
   if (!validate_delegation_evicence(req.body)) {
     debug(validate_delegation_evicence.errors);
     res.status(400).json({
@@ -290,6 +377,15 @@ const _upsert_merge_policy = async function _upsert_merge_policy(req, res) {
     return true;
   }
 
+  // METHOD:
+  // start with stored policy def:
+  // loop over stored policy sets
+  //   Find all given policy sets in the given policy def with same licenses and delegation depth 
+  //   Delete those policy sets from the given policy object
+  //   Loop over the policies in the current stored policy set
+  //     Find all given policies in the given policy def with same 
+  // Add the other policy set objects that are left to the stored policy
+
   let evidence_current = await get_delegation_evidence(evidence.target.accessSubject);
   if (evidence_current != null)
   {
@@ -299,8 +395,9 @@ const _upsert_merge_policy = async function _upsert_merge_policy(req, res) {
     // Make a list containing all new types (type + id combination)
     let p_types = [];
     for (let p_idx = 0; p_idx < evidence.policySets[0].policies.length; p_idx++) {
-      const p_resource = evidence.policySets[0].policies[p_idx].target.resource;
-      const p_actions = evidence.policySets[0].policies[p_idx].target.actions;
+      const p_target = evidence.policySets[0].policies[p_idx].target;
+      const p_resource = p_target.resource;
+      const p_actions = p_target.actions;
 
       if (!p_types.hasOwnProperty(p_resource.type)) {
         p_types[p_resource.type] = [];
