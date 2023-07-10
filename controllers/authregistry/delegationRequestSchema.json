@@ -90,7 +90,7 @@
         "resource": {
           "type": "object",
           "additionalProperties": false,
-          "required": [ "type", "identifiers" ],
+          "required": [ "type", "identifiers", "attributes" ],
           "properties": {
             "type": {
               "$ref": "#/definitions/type"
