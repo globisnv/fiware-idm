@@ -178,7 +178,7 @@ const _query_evidences = async function _query_evidences(req, res) {
 
     debug(`Processing policy set ${i} from the providen mask`);
 
-    return evidence.policySets.map((policy_set, j) => {
+    return evidence.policySets.reduce((acc, policy_set, j) => {
       debug(`  Processing policy set ${j} from the available delegation evidence`);
 
       const response_policy_set = {
@@ -197,8 +197,20 @@ const _query_evidences = async function _query_evidences(req, res) {
         };
       });
 
-      return response_policy_set;
-    });
+      const deny_current = response_policy_set.policies[0].rules[0].effect == "Deny";
+      if (acc.length == 1) {
+        const deny_old = acc[0].policies[0].rules[0].effect == "Deny";
+        if (deny_old && !deny_current) {
+          acc = [];
+        }
+      }
+
+      if (acc.length == 0 || (acc.length > 0 && !deny_current)) {
+        acc.push(response_policy_set);
+      }
+
+      return acc;
+    }, []);
   });
   evidence.policySets = new_policy_sets;
 
