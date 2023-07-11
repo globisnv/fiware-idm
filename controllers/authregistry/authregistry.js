@@ -10,6 +10,7 @@ const uuid = require('uuid');
 const config_service = require('../../lib/configService.js');
 const models = require('../../models/models');
 const utils = require('../../controllers/extparticipant/utils');
+const e = require('express');
 const Request = oauth2_server.Request;
 const Response = oauth2_server.Response;
 
@@ -98,9 +99,8 @@ const _retrieve_policy = async function _retrieve_policy(req, res) {
     return res.status(200).json({evidence});
 }
 
-const simplify_delegation = function simplify_delegation(delegation_body) {
+const simplify_delegation = function simplify_delegation(delegation) {
   debug(`Starting delegation merge`);
-  delegation = delegation_body.delegationEvidence || delegation_body.delegationRequest;
 
   // Merge policy sets
   debug(`Processing policy sets`);
@@ -182,7 +182,7 @@ const simplify_delegation = function simplify_delegation(delegation_body) {
     });
   });
 
-  return delegation_body;
+  return delegation;
 }
 
 const _simplify_policy = async function _simplify_policy(req, res) {
@@ -198,9 +198,101 @@ const _simplify_policy = async function _simplify_policy(req, res) {
     return true;
   }
 
-  const simplified_delegation = simplify_delegation(req.body);
-  return res.status(200).json(simplified_delegation);
+  if (req.body.delegationEvidence) {
+    const simplified_delegation = simplify_delegation(req.body.delegationEvidence);
+    return res.status(200).json({delegationEvidence: simplified_delegation});
+  }
+  else {
+    const simplified_delegation = simplify_delegation(req.body.delegationRequest);
+    return res.status(200).json({delegationRequest: simplified_delegation});
+  }
 };
+
+const delete_ids_from_delegation = async function delete_delegation(accessSubject, identifier, simplify) {
+  // Check whether one or more 'identifier' query parameters are given
+  // If not present, delete the full access policy
+  // If present, only delete the parts of the access policy that contain the given identifiers
+  if (!identifier) {
+    return null;
+  }
+
+  debug(`Retrieving existing access policy information for ${accessSubject}`);
+  let evidence_current = await get_delegation_evidence(accessSubject);
+
+  // Skip delete if no access policy is stored for the given subject
+  if (evidence_current == null) {
+    debug(`No access policy found with given subject, skipping delete`);
+    return;
+  }
+
+  let ids_to_delete = identifier;
+  if (!Array.isArray(ids_to_delete)) {
+    ids_to_delete = [ids_to_delete];
+  }
+
+  // Loop over all policy sets
+  debug(`Deleting access policy information for ${accessSubject} on identifiers ${ids_to_delete}`);
+  for (let set_idx = 0; set_idx < evidence_current.policySets.length; set_idx++) {
+    debug(`Processing policy set ${set_idx}`);
+
+    // Loop over all policies in the current policy set
+    for (let policy_idx = 0; policy_idx < evidence_current.policySets[set_idx].policies.length; policy_idx++) {
+      debug(`  Processing policy ${policy_idx} from the current policy set`);
+
+      // Remove to be deleted identifiers from the policy target resource
+      debug(`  Filtering resource identifiers within the current policy`);
+      const policy = evidence_current.policySets[set_idx].policies[policy_idx];
+      policy.target.resource.identifiers = policy.target.resource.identifiers.filter(id => !ids_to_delete.includes(id));
+
+      // Loop over all rules in the current policy 
+      for (let rule_idx = 0; rule_idx < policy.rules.length; rule_idx++) {
+        debug(`    Processing rule ${rule_idx} from the current policy`);
+        const rule = policy.rules[rule_idx];
+
+        // Skip base rule that only has the 'effect' attribute
+        if (rule.target != null) {
+
+          // Remove to be deleted identifiers from the rule target resource
+          debug(`    Filtering resource identifiers within the current rule`);
+          rule.target.resource.identifiers = rule.target.resource.identifiers.filter(id => !ids_to_delete.includes(id));
+
+          // Remove rule if it has no identifiers left
+          if (rule.target.resource.identifiers.length == 0) {
+            debug(`    Deleting current rule because it is empty`);
+            policy.rules.splice(rule_idx, 1);
+            rule_idx--;
+          }
+        }
+      }
+
+      // Remove policy if it has no identifiers and rules left
+      if (policy.target.resource.identifiers.length == 0 && policy.rules.length == 1) {
+        debug(`  Deleting current policy because it is empty`);
+        evidence_current.policySets[set_idx].policies.splice(policy_idx, 1);
+        policy_idx--;
+      }
+    }
+
+    // Remove policy set if it has no policies left
+    if (evidence_current.policySets[set_idx].policies.length == 0) {
+      debug(`Deleting current policy set because it is empty`);
+      evidence_current.policySets.splice(set_idx, 1);
+      set_idx--;
+    }
+  }
+
+  // If there are no policy sets left, delete the whole policy
+  // If there are, replace the existing access policy 
+  if (evidence_current.policySets.length == 0) {
+    return null;
+  }
+
+  if (simplify) {
+    evidence_current = simplify_delegation(evidence_current);
+  }
+
+  return evidence_current;
+}
 
 const _delete_policy = async function _delete_policy(req, res) {
   const token_info = await authenticate_bearer(req);
@@ -222,103 +314,24 @@ const _delete_policy = async function _delete_policy(req, res) {
       return true;
   }
 
-  // Check whether one or more 'identifier' query parameters are given
-  // If not present, delete the full access policy
-  // If present, only delete the parts of the access policy that contain the given identifiers
-  if (!req.query.identifier) {
-    debug(`Deleting full access policy for ${req.query.accessSubject}`);
+  let accessSubject = req.query.accessSubject;
+  const delegation = await delete_ids_from_delegation(accessSubject, req.query.identifier, true);
+  if (delegation == null) {
+    debug(`Deleting full access policy for ${accessSubject}`);
     await models.delegation_evidence.destroy({
       where: {
         policy_issuer: config.pr.client_id,
-        access_subject: req.query.accessSubject
+        access_subject: accessSubject
       }
     });
-  } else {
-    debug(`Retrieving existing access policy information for ${req.query.accessSubject}`);
-    let evidence_current = await get_delegation_evidence(req.query.accessSubject);
-
-    // Skip delete if no access policy is stored for the given subject
-    if (evidence_current == null) {
-      debug(`No access policy found with given subject, skipping delete`);
-      return res.status(200).json({});
-    }
-
-    let ids_to_delete = req.query.identifier;
-    if (!Array.isArray(ids_to_delete)) {
-      ids_to_delete = [ids_to_delete];
-    }
-
-    // Loop over all policy sets
-    debug(`Deleting access policy information for ${req.query.accessSubject} on identifiers ${ids_to_delete}`);
-    for (let set_idx = 0; set_idx < evidence_current.policySets.length; set_idx++) {
-      debug(`Processing policy set ${set_idx}`);
-
-      // Loop over all policies in the current policy set
-      for (let policy_idx = 0; policy_idx < evidence_current.policySets[set_idx].policies.length; policy_idx++) {
-        debug(`  Processing policy ${policy_idx} from the current policy set`);
-
-        // Remove to be deleted identifiers from the policy target resource
-        debug(`  Filtering resource identifiers within the current policy`);
-        const policy = evidence_current.policySets[set_idx].policies[policy_idx];
-        policy.target.resource.identifiers = policy.target.resource.identifiers.filter(id => !ids_to_delete.includes(id));
-
-        // Loop over all rules in the current policy 
-        for (let rule_idx = 0; rule_idx < policy.rules.length; rule_idx++) {
-          debug(`    Processing rule ${rule_idx} from the current policy`);
-          const rule = policy.rules[rule_idx];
-
-          // Skip base rule that only has the 'effect' attribute
-          if (rule.target != null) {
-
-            // Remove to be deleted identifiers from the rule target resource
-            debug(`    Filtering resource identifiers within the current rule`);
-            rule.target.resource.identifiers = rule.target.resource.identifiers.filter(id => !ids_to_delete.includes(id));
-
-            // Remove rule if it has no identifiers left
-            if (rule.target.resource.identifiers.length == 0) {
-              debug(`    Deleting current rule because it is empty`);
-              policy.rules.splice(rule_idx, 1);
-              rule_idx--;
-            }
-          }
-        }
-
-        // Remove policy if it has no identifiers and rules left
-        if (policy.target.resource.identifiers.length == 0 && policy.rules.length == 1) {
-          debug(`  Deleting current policy because it is empty`);
-          evidence_current.policySets[set_idx].policies.splice(policy_idx, 1);
-          policy_idx--;
-        }
-      }
-
-      // Remove policy set if it has no policies left
-      if (evidence_current.policySets[set_idx].policies.length == 0) {
-        debug(`Deleting current policy set because it is empty`);
-        evidence_current.policySets.splice(set_idx, 1);
-        set_idx--;
-      }
-    }
-
-    // If there are no policy sets left, delete the whole policy
-    // If there are, replace the existing access policy 
-    if (evidence_current.policySets.length == 0) {
-      debug(`Deleting full access policy for ${req.query.accessSubject}`);
-      await models.delegation_evidence.destroy({
-        where: {
-          policy_issuer: config.pr.client_id,
-          access_subject: req.query.accessSubject
-        }
-      });
-    }
-    else {
-      evidence_current = simplify_delegation(evidence_current);
-      debug(`Replacing access policy for ${req.query.accessSubject}`);
-      models.delegation_evidence.upsert({
-        policy_issuer: evidence_current.policyIssuer,
-        access_subject: evidence_current.target.accessSubject,
-        policy: evidence_current
-      });
-    }
+  }
+  else {
+    debug(`Replacing access policy for ${accessSubject}`);
+    models.delegation_evidence.upsert({
+      policy_issuer: delegation.policyIssuer,
+      access_subject: accessSubject,
+      policy: delegation
+    });
   }
 
   return res.status(200).json({});
@@ -399,115 +412,31 @@ const _upsert_merge_policy = async function _upsert_merge_policy(req, res) {
     return true;
   }
 
-  // METHOD:
-  // start with stored policy def:
-  // loop over stored policy sets
-  //   Find all given policy sets in the given policy def with same licenses and delegation depth 
-  //   Delete those policy sets from the given policy object
-  //   Loop over the policies in the current stored policy set
-  //     Find all given policies in the given policy def with same 
-  // Add the other policy set objects that are left to the stored policy
-
-  let evidence_current = await get_delegation_evidence(evidence.target.accessSubject);
-  if (evidence_current != null)
-  {
-    // TODO multiple policy sets
-    // TODO rule exceptions
-
-    // Make a list containing all new types (type + id combination)
-    let p_types = [];
-    for (let p_idx = 0; p_idx < evidence.policySets[0].policies.length; p_idx++) {
-      const p_target = evidence.policySets[0].policies[p_idx].target;
-      const p_resource = p_target.resource;
-      const p_actions = p_target.actions;
-
-      if (!p_types.hasOwnProperty(p_resource.type)) {
-        p_types[p_resource.type] = [];
-      }
-
-      // Collect type + id combo's per actions and attributes, to be used later
-      const p_obj_prev_idx = p_types[p_resource.type].findIndex(obj => arrays_are_equal(obj.actions, p_actions) && arrays_are_equal(obj.attrs, p_resource.attributes));
-      if (p_obj_prev_idx != -1) {
-        p_types[p_resource.type][p_obj_prev_idx].idx.push(p_idx);
-        p_types[p_resource.type][p_obj_prev_idx].ids.push(...p_resource.identifiers);
-      } else {
-        let p_obj = {idx: [p_idx], ids: p_resource.identifiers, selected: new Array(p_resource.identifiers.length).fill(false), actions: p_actions, attrs: p_resource.attributes};
-        p_types[p_resource.type].push(p_obj);
-      }
-    }
-
-    // Remove these types from the currently stored policy definition
-    for (let p_current_idx = 0; p_current_idx < evidence_current.policySets[0].policies.length; p_current_idx++) {
-      const p_current_policy = evidence_current.policySets[0].policies[p_current_idx];
-      const p_current_resource = p_current_policy.target.resource;
-      const p_current_actions = p_current_policy.target.actions;
-      
-      // Policy has the same type as one of the new policies
-      if (p_types.hasOwnProperty(p_current_resource.type)) {
-        for (let type_idx = 0; type_idx < p_types[p_current_resource.type].length; type_idx++) {
-
-          // Get currently looped new policy object
-          const p_obj = p_types[p_current_resource.type][type_idx];
-
-          // Check whether the currently looped new policy object has the same actions as the currently looped stored policy object.
-          // If this is the case, it means that the new identifiers in the policy object can be safely added to the identifiers linked to the stored policy object.
-          // If this is not the case, it means that new identifiers must not be present in the identifiers linked to the stored policy object.
-          if (arrays_are_equal(p_obj.actions, p_current_actions) && arrays_are_equal(p_obj.attrs, p_current_resource.attributes) && p_current_policy.rules.length == 1) {
-            for (let p_ids_idx = 0; p_ids_idx < p_obj.ids.length; p_ids_idx++) {
-              const p_id = p_obj.ids[p_ids_idx];
-              p_obj.selected[p_ids_idx] = true;
-              if (!p_current_resource.identifiers.includes(p_id)) {
-                p_current_resource.identifiers.push(p_id);
-              }
-            }
-          } else {
-            for (let p_current_ids_idx = 0; p_current_ids_idx < p_current_resource.identifiers.length; p_current_ids_idx++) {
-              if (p_obj.ids.includes(p_current_resource.identifiers[p_current_ids_idx])) {
-                p_current_resource.identifiers.splice(p_current_ids_idx, 1);
-                p_current_ids_idx--;
-              }
-            }
-          }
-
-          // Remove policy if empty
-          if (p_current_resource.identifiers.length == 0) {
-            evidence_current.policySets[0].policies.splice(p_current_idx, 1);
-            p_current_idx--;
-            break;
-          }
+  // Create a list of all ids to remove from the currently stored policy
+  const ids = [];
+  evidence.policySets.every(set => {
+    set.policies.every(pol => {
+      ids.push(...pol.target.resource.identifiers);
+      pol.rules.every(rule => {
+        if (rule.effect != "Permit") { // Following official iSHARE spec that notes that only the first rule can be a permit
+          ids.push(...rule.target.resource.identifiers);
         }
-      }
-    }
-
-    // Add the new policies to the policy definition
-    // TODO exceptions to the rule
-    for (let type in p_types) {
-      if (p_types.hasOwnProperty(type)) {
-        for (let t_idx = 0; t_idx < p_types[type].length; t_idx++) {
-          let p = null;
-          for (let p_id_idx = 0; p_id_idx < p_types[type][t_idx].ids.length; p_id_idx++) {
-            if (!p_types[type][t_idx].selected[p_id_idx]) {
-              if (!p) {
-                const policy_idx = p_types[type][t_idx].idx[p_id_idx];
-                p = evidence.policySets[0].policies[policy_idx];
-              } else {
-                const p_id = p_types[type][t_idx].ids[p_id_idx];
-                if (!p.target.resource.identifiers.includes(p_id)) {
-                  p.target.resource.identifiers.push(p_id);
-                }
-              }
-            }
-          }
-
-          if (p) {
-            evidence_current.policySets[0].policies.push(p);
-          }
-        }
-      }
-   }
-  } else {
+      });
+    });
+  });
+  
+  // If there already exists an evidence definition, delete all identifiers from the given definition from that stored definition.
+  // After this, push the given definition into the stored definition
+  let evidence_current = await delete_ids_from_delegation(evidence.target.accessSubject, ids, false);
+  if (evidence_current != null) {
+    evidence_current.policySets.push(...evidence.policySets);
+  }
+  else {
     evidence_current = evidence;
   }
+
+  // Simplify definition if possible
+  evidence_current = simplify_delegation(evidence_current);
 
   models.delegation_evidence.upsert({
     policy_issuer: evidence_current.policyIssuer,
