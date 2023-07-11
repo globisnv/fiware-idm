@@ -22,6 +22,10 @@ router.delete(
   authregistry_controller.delete_policy
 );
 router.post(
+  '/simplify',
+  authregistry_controller.simplify_policy
+);
+router.post(
   '/delegation',
   authregistry_controller.query_evidences
 );

@@ -98,27 +98,26 @@ const _retrieve_policy = async function _retrieve_policy(req, res) {
     return res.status(200).json({evidence});
 }
 
-const _simplify_policy = async function _simplify_policy(req, res) {
-  const token_info = await authenticate_bearer(req);
+const simplify_delegation = function simplify_delegation(delegation_body) {
+  debug(`Starting delegation merge`);
+  delegation = delegation_body.delegationEvidence || delegation_body.delegationRequest;
 
-  debug(`Validating delegation evidence structure`);
-  if (!validate_delegation_evicence(req.body)) {
-    debug(validate_delegation_evicence.errors);
-    res.status(400).json({
-      error: "Invalid policy document",
-      details: validate_delegation_evicence.errors
-    });
-    return true;
-  }
-
-  const evidence = req.body.delegationEvidence;
-
-  // Merge molicy sets
-  evidence.policySets = evidence.policySets.reduce((acc, curr) => {
-    const matching_set_idx = acc.findIndex(set => set.maxDelegationDepth == curr.maxDelegationDepth 
-      && arrays_are_equal(set.target.environment.licenses, curr.target.environment.licenses))
+  // Merge policy sets
+  debug(`Processing policy sets`);
+  delegation.policySets = delegation.policySets.reduce((acc, curr, idx) => {
+    debug(`  Processing policy set ${idx}`);
+    let matching_set_idx;
+    
+    if (curr.maxDelegationDepth != null) {
+      matching_set_idx = acc.findIndex(set => set.maxDelegationDepth == curr.maxDelegationDepth 
+        && arrays_are_equal(set.target.environment.licenses, curr.target.environment.licenses));
+    }
+    else {
+      matching_set_idx = acc.length - 1;
+    }
       
     if (matching_set_idx != -1) {
+      debug(`    Merging policy set ${idx} with policy set ${matching_set_idx}`);
       acc[matching_set_idx].policies.push(...curr.policies);
     }
     else {
@@ -129,8 +128,10 @@ const _simplify_policy = async function _simplify_policy(req, res) {
   }, []);
 
   // Merge policies inside policy set
-  evidence.policySets.every(set => {
-    set.policies = set.policies.reduce((acc, curr) => {
+  debug(`Processing policies`);
+  delegation.policySets.every((set, set_idx) => {
+    set.policies = set.policies.reduce((acc, curr, idx) => {
+      debug(`  Processing policy ${idx} within policy set ${set_idx}`);
       const curr_resource = curr.target.resource;
       const matching_policy_idx = acc.findIndex(pol => {
         const pol_resource = pol.target.resource;
@@ -139,7 +140,8 @@ const _simplify_policy = async function _simplify_policy(req, res) {
           && arrays_are_equal(pol.target.actions, curr.target.actions);
       });
 
-      if (matching_policy_idx) {
+      if (matching_policy_idx != -1) {
+        debug(`    Merging policy ${idx} with policy ${matching_policy_idx}`);
         acc[matching_policy_idx].target.resource.identifiers.push(...curr.target.resource.identifiers);
         acc[matching_policy_idx].rules.push(...curr.rules.filter(r => r.effect != "Permit")); // Following official iSHARE spec that notes that only the first rule can be a permit
       }
@@ -148,13 +150,15 @@ const _simplify_policy = async function _simplify_policy(req, res) {
       }
 
       return acc;
-    });
+    }, []);
   });
 
   // merge rules inside policy
-  evidence.policySets.every(set => {
-    set.policies.every(pol => {
-      pol.rules.reduce((acc, curr) => {
+  debug(`Processing policy rules`);
+  delegation.policySets.every((set, set_idx) => {
+    set.policies.every((pol, pol_idx) => {
+      pol.rules.reduce((acc, curr, idx) => {
+        debug(`  Processing rule ${idx} from policy ${pol_idx} within policy set ${set_idx}`);
         if (curr.target) {
           const curr_resource = curr.target.resource;
           const matching_rule_idx = acc.findIndex(rule => {
@@ -164,7 +168,8 @@ const _simplify_policy = async function _simplify_policy(req, res) {
               && arrays_are_equal(rule.target.actions, curr.target.actions);
           });
     
-          if (matching_rule_idx) {
+          if (matching_rule_idx != -1) {
+            debug(`    Merging policy rule ${idx} with policy rule ${matching_rule_idx}`);
             acc[matching_rule_idx].target.resource.identifiers.push(...curr.target.resource.identifiers);
           }
           else {
@@ -173,11 +178,28 @@ const _simplify_policy = async function _simplify_policy(req, res) {
         }
 
         return acc;
-      });
-    })
-  })
+      }, []);
+    });
+  });
 
-  return res.status(200).json({evidence});
+  return delegation_body;
+}
+
+const _simplify_policy = async function _simplify_policy(req, res) {
+  await authenticate_bearer(req);
+
+  debug(`Validating delegation`);
+  if (!validate_delegation_request(req.body) && !validate_delegation_evicence(req.body)) {
+    debug(validate_delegation_request.errors);
+    res.status(400).json({
+      error: "Invalid delegation evidence or mask",
+      details: validate_delegation_request.errors
+    });
+    return true;
+  }
+
+  const simplified_delegation = simplify_delegation(req.body);
+  return res.status(200).json(simplified_delegation);
 };
 
 const _delete_policy = async function _delete_policy(req, res) {
@@ -235,7 +257,6 @@ const _delete_policy = async function _delete_policy(req, res) {
       for (let policy_idx = 0; policy_idx < evidence_current.policySets[set_idx].policies.length; policy_idx++) {
         debug(`  Processing policy ${policy_idx} from the current policy set`);
 
-        if ()
         // Remove to be deleted identifiers from the policy target resource
         debug(`  Filtering resource identifiers within the current policy`);
         const policy = evidence_current.policySets[set_idx].policies[policy_idx];
@@ -290,6 +311,7 @@ const _delete_policy = async function _delete_policy(req, res) {
       });
     }
     else {
+      evidence_current = simplify_delegation(evidence_current);
       debug(`Replacing access policy for ${req.query.accessSubject}`);
       models.delegation_evidence.upsert({
         policy_issuer: evidence_current.policyIssuer,
@@ -628,6 +650,7 @@ const _query_evidences = async function _query_evidences(req, res) {
 exports.oauth2 = oauth2;
 exports.get_delegation_evidence = get_delegation_evidence;
 exports.arrays_are_equal = arrays_are_equal;
+
 exports.upsert_policy = function upsert_policy(req, res, next) {
   debug(' --> upsert policy');
   _upsert_policy(req, res).then(
@@ -759,6 +782,38 @@ exports.retrieve_policy = function retrieve_policy(req, res, next) {
 exports.query_evidences = function query_evidences(req, res, next) {
   debug(' --> delegate');
   _query_evidences(req, res).then(
+    (skip) => {
+      if (!skip) {
+        next();
+      }
+    },
+    (err) => {
+      if (err instanceof oauth2_server.OAuthError) {
+        debug('Error ', err.message);
+        if (err.details) {
+          debug('Due: ', err.details);
+        }
+        res.status(err.status);
+
+        res.locals.error = err;
+        res.render('errors/oauth', {
+          query: {},
+          application: req.application
+        });
+      } else {
+        res.status(500).json({
+          message: err,
+          code: 500,
+          title: 'Internal Server Error'
+        });
+      }
+    }
+  );
+};
+
+exports.simplify_policy = function simplify_policy(req, res, next) {
+  debug(' --> simplify');
+  _simplify_policy(req, res).then(
     (skip) => {
       if (!skip) {
         next();
